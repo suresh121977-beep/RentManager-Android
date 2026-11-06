@@ -31,8 +31,11 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     val msgMap = dao.msgMap().st(emptyList())
     val favs = dao.favs().st(emptyList())
     val vacated = dao.vacated().st(emptyList())
+    val advTxns = dao.advTxns().st(emptyList())
+    val visited = dao.visited().st(emptyList())
     val toast = MutableSharedFlow<String>(extraBufferCapacity = 8)
     private fun say(s: String) { toast.tryEmit(s) }
+    fun toastMsg(s: String) = say(s)
 
     var yellow = MutableStateFlow(prefs.getBoolean("yellow", false))
     fun toggleTheme() { yellow.value = !yellow.value; prefs.edit().putBoolean("yellow", yellow.value).apply() }
@@ -62,13 +65,44 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         dao.upsertReadings(rows)
         val unresolved = rows.count { it.endOnlyUnresolved }
         say("Imported ${rows.size} rows" + if (unresolved > 0) " ($unresolved need a start reading)" else "")
-        syncBills()
+        syncInternal()
+    }
+    /** CSV with BillNo,PreviousReading – current readings are then entered by voice or typing */
+    fun importPrevReadings(text: String) = viewModelScope.launch {
+        val rows = parseBalanceCsv(text)
+        if (rows.isEmpty()) { say("No valid rows. Use BillNo,PreviousReading"); return@launch }
+        val m = month.value; val gs = groups.value
+        dao.upsertReadings(rows.map { (b, v) ->
+            val g = groupFor(b, gs); val p = g?.pricePerUnit?.takeIf { it > 0 } ?: price
+            Reading(b, m, v, 0.0, 0.0, p, 0.0)
+        })
+        say("${rows.size} bills ready – now enter current readings (Quick view)")
+    }
+    /** Last month's current reading becomes this month's previous reading */
+    fun startFromLastMonth() = viewModelScope.launch {
+        val m = month.value; val pm = shiftMonth(m, -1); val gs = groups.value
+        val have = readings.value.filter { it.month == m && it.currReading > 0 }.map { it.billNo }.toSet()
+        val rows = readings.value.filter { it.month == pm && it.currReading > 0 && it.billNo !in have }.map { r ->
+            val g = groupFor(r.billNo, gs); val p = g?.pricePerUnit?.takeIf { it > 0 } ?: price
+            Reading(r.billNo, m, r.currReading, 0.0, 0.0, p, 0.0)
+        }
+        if (rows.isEmpty()) { say("No readings found in last month"); return@launch }
+        dao.upsertReadings(rows); say("${rows.size} bills ready – enter current readings")
+    }
+    fun saveCurrent(billNo: String, curr: Double) = viewModelScope.launch {
+        val m = month.value
+        val r = dao.readings().first().firstOrNull { it.billNo == billNo && it.month == m } ?: return@launch
+        val prev = r.prevReading ?: return@launch
+        val g = groupFor(billNo, groups.value); val p = g?.pricePerUnit?.takeIf { it > 0 } ?: price
+        val u = curr - prev
+        dao.upsertReadings(listOf(r.copy(currReading = curr, units = u, price = p, charge = u * p, endOnlyUnresolved = false)))
+        syncInternal()
     }
     fun addReading(billNo: String, prev: Double, curr: Double) = viewModelScope.launch {
         val b = norm(billNo); if (b.isEmpty()) return@launch
         val g = groupFor(b, groups.value); val p = g?.pricePerUnit?.takeIf { it > 0 } ?: price
         dao.upsertReadings(listOf(Reading(b, month.value, prev, curr, curr - prev, p, (curr - prev) * p)))
-        syncBills()
+        syncInternal(); say("$b added ✓")
     }
     fun clearReadings() = viewModelScope.launch { dao.deleteReadings(month.value); dao.deleteBills(month.value); say("Removed this month's readings & bills") }
 
@@ -78,45 +112,52 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     private suspend fun syncInternal() {
         val m = month.value; val gs = dao.groups().first()
         val rs = dao.readings().first().filter { it.month == m }
+        val ready = rs.filter { !it.pending() }
         val old = dao.bills().first().filter { it.month == m }.associateBy { it.billNo }
         val tfs = dao.tenantFiles().first().associateBy { norm(it.fileName) }
-        val out = rs.map { r ->
-            val g = groupFor(r.billNo, gs)
-            val fixed = if (g != null && g.pricePerUnit > 0 && r.price != g.pricePerUnit)
+        fun make(billNo: String, r: Reading?): Bill {
+            val g = groupFor(billNo, gs)
+            val tf = tfs[billNo]; val active = tf?.active()?.size
+            val vacant = tf != null && active == 0
+            val fresher = tf != null && (active ?: 0) > 0 && isFresher(tf, m)
+            val advDue = if (fresher) max(0.0, expectedAdvance(g, active ?: 0) - (tf?.advance ?: 0.0)) else 0.0
+            val fixed = if (r != null && g != null && g.pricePerUnit > 0 && r.price != g.pricePerUnit)
                 r.copy(price = g.pricePerUnit, charge = r.units * g.pricePerUnit) else r
-            val tf = tfs[r.billNo]
-            val active = tf?.active()?.size
-            buildBill(r.billNo, m, fixed, g, old[r.billNo], active, tf != null && active == 0)
+            return buildBill(billNo, m, fixed, g, old[billNo], active, vacant, fresher, advDue)
         }
-        dao.upsertReadings(rs.map { r -> val g = groupFor(r.billNo, gs); if (g != null && g.pricePerUnit > 0) r.copy(price = g.pricePerUnit, charge = r.units * g.pricePerUnit) else r })
+        val out = ArrayList<Bill>()
+        ready.forEach { out.add(make(it.billNo, it)) }
+        // new tenants (after the 10th) without a meter reading still get an advance-due bill
+        tfs.values.forEach { tf ->
+            val k = norm(tf.fileName)
+            if (rs.none { it.billNo == k } && tf.active().isNotEmpty() && isFresher(tf, m)) out.add(make(k, null))
+        }
+        dao.upsertReadings(ready.map { r ->
+            val g = groupFor(r.billNo, gs)
+            if (g != null && g.pricePerUnit > 0) r.copy(price = g.pricePerUnit, charge = r.units * g.pricePerUnit) else r
+        })
         dao.upsertBills(out)
     }
 
     fun editBill(b: Bill, persons: Int, prevBalance: Double, rentDays: Int) = viewModelScope.launch {
-        val g = groupFor(b.billNo, groups.value)
-        val r = readings.value.firstOrNull { it.billNo == b.billNo && it.month == b.month }
-        dao.upsertBills(listOf(buildBill(b.billNo, b.month, r, g, b.copy(prevBalance = prevBalance, rentDays = rentDays), persons, b.vacant)))
-        say("${b.billNo} updated ✓")
+        dao.upsertBills(listOf(b.copy(persons = persons, prevBalance = prevBalance, rentDays = rentDays)))
+        syncInternal(); say("${b.billNo} updated ✓")
     }
     fun importBalances(text: String) = viewModelScope.launch {
         val rows = parseBalanceCsv(text); if (rows.isEmpty()) { say("No valid rows (BillNo,PreviousBalance)"); return@launch }
-        val m = month.value; val bs = bills.value.filter { it.month == m }.associateBy { it.billNo }; var n = 0
-        val gs = groups.value
-        val upd = rows.mapNotNull { (b, v) -> bs[b]?.let { n++; val r = readings.value.firstOrNull { x -> x.billNo == b && x.month == m }
-            buildBill(b, m, r, groupFor(b, gs), it.copy(prevBalance = v), null, it.vacant) } }
-        dao.upsertBills(upd); say("Previous balance set for $n bills")
+        val m = month.value; val bs = bills.value.filter { it.month == m }.associateBy { it.billNo }
+        val upd = rows.mapNotNull { (b, v) -> bs[b]?.copy(prevBalance = v) }
+        dao.upsertBills(upd); syncInternal(); say("Previous balance set for ${upd.size} bills")
     }
     /** Previous month's unpaid balance becomes this month's previous balance */
     fun carryBalances() = viewModelScope.launch {
-        val m = month.value; val pm = shiftMonth(m, -1); val gs = groups.value
+        val m = month.value; val pm = shiftMonth(m, -1)
         val pb = bills.value.filter { it.month == pm }.associateBy { it.billNo }
         val pp = payments.value.filter { it.month == pm }.associateBy { it.billNo }
         val upd = bills.value.filter { it.month == m }.map { b ->
-            val prev = pb[b.billNo]?.let { balanceOf(it, pp[b.billNo]) } ?: 0.0
-            val r = readings.value.firstOrNull { x -> x.billNo == b.billNo && x.month == m }
-            buildBill(b.billNo, m, r, groupFor(b.billNo, gs), b.copy(prevBalance = prev), null, b.vacant)
+            b.copy(prevBalance = pb[b.billNo]?.let { balanceOf(it, pp[b.billNo]) } ?: 0.0)
         }
-        dao.upsertBills(upd); say("Carried forward last month's balances")
+        dao.upsertBills(upd); syncInternal(); say("Carried forward last month's balances")
     }
 
     // ---------------- Groups ----------------
@@ -150,6 +191,12 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     }
     fun toggleFav(b: String) = viewModelScope.launch { if (favs.value.any { it.billNo == b }) dao.deleteFav(b) else dao.upsertFav(Fav(b)) }
 
+    // ---------------- Visited folder (opens again next day) ----------------
+    fun moveVisited(billNo: String, reason: String) = viewModelScope.launch {
+        dao.upsertVisited(Visited(billNo, month.value, LocalDate.now().toString(), reason)); say("$billNo moved to Visited folder")
+    }
+    fun unvisit(billNo: String) = viewModelScope.launch { dao.deleteVisited(billNo, month.value); say("$billNo back to Pending") }
+
     // ---------------- Messages ----------------
     fun saveMsg(list: List<MsgMap>) = viewModelScope.launch { dao.upsertMsg(list); say("Saved ${list.size} mobile numbers") }
 
@@ -178,10 +225,32 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         }
         dao.upsertTenantFiles(map.values.toList()); syncInternal(); say("Persons imported ✓")
     }
+    /** Set entry date of every tenant who entered after [date] to [date] -> they all count as old tenants */
+    fun resetEntryDates(date: String) = viewModelScope.launch {
+        val d = parseDate(date) ?: run { say("Invalid date (yyyy-mm-dd)"); return@launch }
+        val upd = tenantFiles.value.map { tf ->
+            tf.withPersons(tf.persons().map { p -> val e = parseDate(p.entryDate); if (e == null || e.isAfter(d)) p.copy(entryDate = d.toString()) else p })
+        }
+        dao.upsertTenantFiles(upd); syncInternal(); say("All tenants set as old tenants (entry $d)")
+    }
+    fun addAdvance(fileName: String, kind: String, amount: Double, date: String, note: String) = viewModelScope.launch {
+        val tf = tenantFiles.value.firstOrNull { it.fileName == fileName } ?: return@launch
+        if (amount <= 0) return@launch
+        val nb = if (kind == "DEBIT") tf.advance - amount else tf.advance + amount
+        dao.insertAdv(AdvTxn(0, fileName, kind, amount, date, note))
+        dao.upsertTenantFiles(listOf(tf.copy(advance = nb)))
+        syncInternal(); say(if (kind == "DEBIT") "Debited ${money(amount)} ✓" else "Advance ${money(amount)} added ✓")
+    }
+    fun deleteAdvTxn(t: AdvTxn) = viewModelScope.launch {
+        val tf = tenantFiles.value.firstOrNull { it.fileName == t.fileName }
+        if (tf != null) dao.upsertTenantFiles(listOf(tf.copy(advance = if (t.kind == "DEBIT") tf.advance + t.amount else tf.advance - t.amount)))
+        dao.deleteAdv(t.id); syncInternal()
+    }
     fun vacate(fileName: String, date: String, due: Double, advance: Double) = viewModelScope.launch {
         val tf = tenantFiles.value.firstOrNull { it.fileName == fileName } ?: return@launch
         val adj = minOf(advance, due)
         dao.insertVacated(Vacated(0, fileName, tf.active().joinToString(", ") { it.name }, date, due, advance, adj, advance - adj, due - adj))
+        if (advance > 0) dao.insertAdv(AdvTxn(0, fileName, "DEBIT", advance, date, "Vacated: rent adjusted ${adj.toInt()}, repaid ${(advance - adj).toInt()}"))
         dao.upsertTenantFiles(listOf(tf.withPersons(tf.persons().map { if (it.exitDate.isBlank()) it.copy(exitDate = date) else it }).copy(advance = 0.0)))
         syncInternal(); say("$fileName vacated ✓")
     }
@@ -211,9 +280,11 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         if (allMonths) dao.resetAll(withFinance) else dao.resetMonth(month.value, withFinance)
         say("Reset done ✓")
     }
-    suspend fun backupJson(): String = gson.toJson(Backup(1, LocalDate.now().toString(),
-        dao.groups().first(), dao.readings().first(), dao.bills().first(), dao.payments().first(), dao.logs().first(),
-        dao.finance().first(), dao.eb().first(), dao.tenantFiles().first(), dao.msgMap().first(), dao.favs().first(), dao.vacated().first()))
+    suspend fun backupJson(): String = gson.toJson(Backup(version = 1, savedAt = LocalDate.now().toString(),
+        groups = dao.groups().first(), readings = dao.readings().first(), bills = dao.bills().first(), payments = dao.payments().first(),
+        logs = dao.logs().first(), finance = dao.finance().first(), eb = dao.eb().first(), tenantFiles = dao.tenantFiles().first(),
+        msgMap = dao.msgMap().first(), favs = dao.favs().first(), vacated = dao.vacated().first(),
+        advTxns = dao.advTxns().first(), visited = dao.visited().first()))
     fun restoreJson(json: String) = viewModelScope.launch {
         try {
             val b = gson.fromJson(json, Backup::class.java)

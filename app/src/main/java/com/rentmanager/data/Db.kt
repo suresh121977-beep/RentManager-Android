@@ -2,6 +2,8 @@ package com.rentmanager.data
 
 import android.content.Context
 import androidx.room.*
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -56,6 +58,18 @@ abstract class AppDao {
     @Query("SELECT * FROM vacated ORDER BY id DESC") abstract fun vacated(): Flow<List<Vacated>>
     @Insert abstract suspend fun insertVacated(v: Vacated)
 
+    @Query("SELECT * FROM adv_txns ORDER BY date, id") abstract fun advTxns(): Flow<List<AdvTxn>>
+    @Insert abstract suspend fun insertAdv(t: AdvTxn)
+    @Query("DELETE FROM adv_txns WHERE id=:id") abstract suspend fun deleteAdv(id: Long)
+    @Query("DELETE FROM adv_txns") abstract suspend fun deleteAllAdv()
+    @Insert(onConflict = OnConflictStrategy.REPLACE) abstract suspend fun insertAdvs(l: List<AdvTxn>)
+
+    @Query("SELECT * FROM visited") abstract fun visited(): Flow<List<Visited>>
+    @Upsert abstract suspend fun upsertVisited(v: Visited)
+    @Query("DELETE FROM visited WHERE billNo=:b AND month=:m") abstract suspend fun deleteVisited(b: String, m: String)
+    @Query("DELETE FROM visited") abstract suspend fun deleteAllVisited()
+    @Insert(onConflict = OnConflictStrategy.REPLACE) abstract suspend fun insertVisiteds(l: List<Visited>)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE) abstract suspend fun insertGroups(l: List<GroupE>)
     @Insert(onConflict = OnConflictStrategy.REPLACE) abstract suspend fun insertPayments(l: List<Payment>)
     @Insert(onConflict = OnConflictStrategy.REPLACE) abstract suspend fun insertLogs(l: List<PaymentLog>)
@@ -73,6 +87,8 @@ abstract class AppDao {
     }
     @Transaction open suspend fun restore(b: Backup) {
         deleteAllReadings(); deleteAllBills(); deleteAllPayments(); deleteAllLogs(); deleteAllFinance(); deleteAllEb()
+        deleteAllAdv(); deleteAllVisited()
+        insertAdvs(b.advTxns); insertVisiteds(b.visited)
         insertGroups(b.groups); upsertReadings(b.readings); upsertBills(b.bills); insertPayments(b.payments)
         insertLogs(b.logs); insertFinances(b.finance); insertEbs(b.eb); upsertTenantFiles(b.tenantFiles)
         upsertMsg(b.msgMap); insertFavs(b.favs); insertVacs(b.vacated)
@@ -81,16 +97,24 @@ abstract class AppDao {
 
 @Database(
     entities = [GroupE::class, Reading::class, Bill::class, Payment::class, PaymentLog::class, FinanceRec::class,
-        EbBill::class, TenantFile::class, MsgMap::class, Fav::class, Vacated::class],
-    version = 1, exportSchema = false
+        EbBill::class, TenantFile::class, MsgMap::class, Fav::class, Vacated::class, AdvTxn::class, Visited::class],
+    version = 2, exportSchema = false
 )
 abstract class Db : RoomDatabase() {
     abstract fun dao(): AppDao
     companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE rent_groups ADD COLUMN limitAdvance REAL NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE rent_groups ADD COLUMN extraPersonAdvance REAL NOT NULL DEFAULT 0")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `adv_txns` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `fileName` TEXT NOT NULL, `kind` TEXT NOT NULL, `amount` REAL NOT NULL, `date` TEXT NOT NULL, `note` TEXT NOT NULL)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `visited` (`billNo` TEXT NOT NULL, `month` TEXT NOT NULL, `visitedDate` TEXT NOT NULL, `reason` TEXT NOT NULL, PRIMARY KEY(`billNo`, `month`))")
+            }
+        }
         @Volatile private var inst: Db? = null
         fun get(c: Context): Db = inst ?: synchronized(this) {
             inst ?: Room.databaseBuilder(c.applicationContext, Db::class.java, "rent_manager.db")
-                .fallbackToDestructiveMigration().build().also { inst = it }
+                .addMigrations(MIGRATION_1_2).build().also { inst = it }
         }
     }
 }

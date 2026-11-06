@@ -4,6 +4,7 @@ package com.rentmanager.ui
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
@@ -77,10 +78,10 @@ val Teal = Color(0xFF14B8A6); val Red = Color(0xFFF87171); val Green = Color(0xF
         dismissButton = { TextButton(onDismiss) { Text("Cancel") } })
 }
 
-@Composable fun BillRow(b: Bill, p: Payment?, fav: Boolean, onPay: () -> Unit, onFav: () -> Unit, onLong: (() -> Unit)? = null) {
+@Composable fun BillRow(b: Bill, p: Payment?, fav: Boolean, onPay: () -> Unit, onFav: () -> Unit, onLong: (() -> Unit)? = null, onOpen: (() -> Unit)? = null) {
     val st = statusOf(b, p); val bal = balanceOf(b, p)
     val c = when (st) { PayStatus.PAID -> Green; PayStatus.PARTIAL -> Amber; else -> Red }
-    Panel {
+    Panel(if (onOpen != null) Modifier.clickable { onOpen() } else Modifier) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(b.billNo, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)

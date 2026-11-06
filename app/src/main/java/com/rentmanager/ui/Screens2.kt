@@ -20,27 +20,6 @@ import com.rentmanager.util.Voice
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 
-// 12 --------------------------------------------------------------- Spending & Income
-@Composable fun FinanceScreen(vm: AppVM) {
-    val fin by vm.finance.collectAsState(); val eb by vm.eb.collectAsState(); val m by vm.month.collectAsState(); val pays by vm.payments.collectAsState()
-    val ctx = LocalContext.current; var kind by remember { mutableStateOf("SPEND") }; var amt by remember { mutableStateOf("") }; var cat by remember { mutableStateOf("") }
-    var note by remember { mutableStateOf("") }; var all by remember { mutableStateOf(false) }
-    val l = fin.filter { all || it.date.startsWith(m) }
-    val rent = pays.filter { all || it.month == m }.sumOf { it.received }; val ebPaid = eb.filter { all || it.month == m }.sumOf { it.paidAmount }
-    val inc = l.filter { it.kind == "INCOME" }.sumOf { it.amount }; val sp = l.filter { it.kind == "SPEND" }.sumOf { it.amount }
-    LazyColumn {
-        item { Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { Stat("INCOME", money(inc + rent), Green, Modifier.weight(1f)); Stat("SPENDING", money(sp + ebPaid), Red, Modifier.weight(1f)) }
-            Stat("NET", money(inc + rent - sp - ebPaid), modifier = Modifier.fillMaxWidth())
-            Lbl("Includes rent collected ${money(rent)} and EB bills paid ${money(ebPaid)} automatically"); Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) { Switch(all, { all = it }); Text(" All months") } }
-        item { Panel { Chips(listOf("SPEND", "INCOME"), kind) { kind = it }
-            NumField("Amount ₹", amt, { amt = it }, Modifier.fillMaxWidth()); TxtField("Category", cat, { cat = it }, Modifier.fillMaxWidth()); TxtField("Note", note, { note = it }, Modifier.fillMaxWidth())
-            Btn(if (kind == "SPEND") "Add Expense" else "Add Income") { num(amt)?.let { vm.addFinance(kind, it, cat, note, LocalDate.now().toString()); amt = ""; cat = ""; note = "" } }
-            BtnO("⬇ Save CSV") { Files.share(ctx, "finance_${if (all) "all" else m}.csv", "text/csv", "Date,Type,Amount,Category,Note\n" + l.joinToString("\n") { "${it.date},${it.kind},${it.amount},${csvEsc(it.category)},${csvEsc(it.note)}" }) } } }
-        items(l) { f -> Panel { Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("${if (f.kind == "INCOME") "💰" else "💸"} ${money(f.amount)} ${f.category}"); Lbl("${fmtDay(f.date)} ${f.note}") }
-            TextButton({ vm.deleteFinance(f.id) }) { Text("🗑", color = Red) } } } }
-    }
-}
-
 // 13 --------------------------------------------------------------- Electric Bill (gain/loss)
 @Composable fun ElectricScreen(vm: AppVM) {
     val bills = monthBills(vm); val eb by vm.eb.collectAsState(); val m by vm.month.collectAsState()
@@ -113,7 +92,7 @@ import java.time.LocalDate
 }
 
 // 19 --------------------------------------------------------------- Voice Payment
-@Composable fun VoiceScreen(vm: AppVM) {
+@Composable fun VoiceCommandPanel(vm: AppVM) {
     val ctx = LocalContext.current; val voice = remember { Voice(ctx) }; DisposableEffect(Unit) { onDispose { voice.shutdown() } }
     val bills = monthBills(vm); val pays = monthPays(vm); val log = remember { mutableStateListOf<String>() }
     var heard by remember { mutableStateOf("") }; var cmd by remember { mutableStateOf<VoiceCmd?>(null) }; var speaker by remember { mutableStateOf(true) }

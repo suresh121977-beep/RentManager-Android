@@ -112,17 +112,39 @@ fun parseEbCsv(text: String, month: String, startSerial: Int): List<EbBill> {
     }
 }
 
-/** Bill = units*price + rent(days/30) + extra persons*extraRent + extraCharge + previous balance */
-fun buildBill(billNo: String, month: String, r: Reading?, g: GroupE?, old: Bill?, personsOverride: Int?, vacant: Boolean): Bill {
+/** A bill whose current reading has not been entered yet (waiting for voice / manual entry) */
+fun Reading.pending() = currReading <= 0.0 && prevReading != null
+
+/** Bill cycle is 10th to 10th: month M covers (M-1)-10 .. M-10 */
+data class Cycle(val start: LocalDate, val end: LocalDate)
+fun cycleFor(month: String): Cycle { val ym = YearMonth.parse(month); return Cycle(ym.minusMonths(1).atDay(10), ym.atDay(10)) }
+fun parseDate(s: String?): LocalDate? = try { LocalDate.parse((s ?: "").take(10)) } catch (e: Exception) { null }
+fun entryDateOf(tf: TenantFile): LocalDate? {
+    val ps = tf.persons(); val use = ps.filter { it.exitDate.isBlank() }.ifEmpty { ps }
+    return use.mapNotNull { parseDate(it.entryDate) }.minOrNull() ?: parseDate(tf.createdAt)
+}
+/** Entry after the 10th (start of this bill cycle) = new tenant: no rent, only advance due */
+fun isFresher(tf: TenantFile, month: String): Boolean {
+    val e = entryDateOf(tf) ?: return false
+    return e.isAfter(cycleFor(month).start)
+}
+fun expectedAdvance(g: GroupE?, activePersons: Int): Double =
+    if (g == null) 0.0 else g.limitAdvance + max(0, activePersons - g.limitedPerson) * g.extraPersonAdvance
+
+/** Bill = units*price + rent(days/30) + extra persons*extraRent + extraCharge + previous balance.
+ *  New tenant (fresher): rentDays = -1, no rent; amount = units charge + advance due + previous balance. */
+fun buildBill(billNo: String, month: String, r: Reading?, g: GroupE?, old: Bill?, personsOverride: Int?, vacant: Boolean,
+              fresher: Boolean = false, advanceDue: Double = 0.0): Bill {
     val units = r?.units ?: old?.units ?: 0.0
     val price = g?.pricePerUnit ?: r?.price ?: 8.5
     val unitsCharge = units * price
-    val days = old?.rentDays ?: 30
-    val rent = (g?.rent ?: 3000.0) * days / 30.0
+    val days = if (fresher) -1 else (old?.rentDays?.takeIf { it >= 0 } ?: 30)
+    val rent = if (fresher) 0.0 else (g?.rent ?: 3000.0) * days / 30.0
     val p = personsOverride ?: old?.persons ?: 0
-    val extraP = max(0, p - (g?.limitedPerson ?: 3))
-    val extraTotal = extraP * (g?.extraPersonRent ?: 500.0)
-    val extraCharge = g?.extraCharge ?: 0.0
+    val lim = g?.limitedPerson ?: 3
+    val extraP = max(0, p - lim)
+    val extraTotal = if (fresher) 0.0 else extraP * (g?.extraPersonRent ?: 500.0)
+    val extraCharge = if (fresher) advanceDue else (g?.extraCharge ?: 0.0)
     val prev = old?.prevBalance ?: 0.0
     val amount = if (vacant) 0.0 else unitsCharge + rent + extraTotal + extraCharge + prev
     return Bill(billNo, month, g?.name ?: groupLetters(billNo), units, unitsCharge, days, rent, p, extraP,
@@ -189,4 +211,51 @@ fun parseVoice(heard: String): VoiceCmd {
     val amt = Regex("\\d+(\\.\\d+)?").find(rest)?.value?.toDoubleOrNull()
     val mode = if (Regex("gpay|g pay|google|online|upi|phone ?pe").containsMatchIn(s)) "GPAY" else "CASH"
     return VoiceCmd(bm?.let { norm(it.groupValues[1] + it.groupValues[2]) }, amt, mode, Regex("\\b(full|all)\\b").containsMatchIn(s))
+}
+
+
+// ---------- spoken numbers / person details ----------
+private val DIGITW = mapOf("zero" to 0, "oh" to 0, "o" to 0, "one" to 1, "two" to 2, "three" to 3, "four" to 4, "five" to 5,
+    "six" to 6, "seven" to 7, "eight" to 8, "nine" to 9)
+
+/** "nine eight 7 6" -> "9876" */
+fun spokenDigits(t: String): String {
+    val sb = StringBuilder()
+    t.lowercase().split(Regex("[^a-z0-9]+")).forEach { w ->
+        val d = DIGITW[w]
+        if (d != null) sb.append(d) else if (w.isNotEmpty() && w.all { it.isDigit() }) sb.append(w)
+    }
+    return sb.toString()
+}
+
+/** "one two five zero" -> 1250 ; "twelve fifty"/"1250"/"one thousand two hundred" -> number */
+fun spokenNumber(t: String): Double? {
+    val toks = t.lowercase().replace(",", " ").split(Regex("\\s+")).filter { it.isNotBlank() }
+    if (toks.size >= 2 && toks.all { DIGITW.containsKey(it) || (it.length == 1 && it[0].isDigit()) }) return spokenDigits(t).toDoubleOrNull()
+    val s = wordsToDigits(t)
+    return Regex("\\d+(\\.\\d+)?").find(s)?.value?.toDoubleOrNull()
+}
+
+data class PersonVoice(val name: String?, val mobile: String?, val aadhaar: String?, val age: String?, val address: String?)
+
+private fun titleCase(s: String) = s.trim().split(" ").filter { it.isNotBlank() }
+    .joinToString(" ") { w -> w.lowercase().replaceFirstChar { c -> c.uppercase() } }
+
+/** "name Ravi Kumar mobile 98765 43210 aadhaar 1234 5678 9012 age 30 address Anna Nagar" */
+fun parsePersonVoice(heard: String): PersonVoice {
+    val kw = mapOf("name" to "name", "mobile" to "mobile", "phone" to "mobile", "contact" to "mobile", "number" to "mobile",
+        "aadhaar" to "aadhaar", "aadhar" to "aadhaar", "adhar" to "aadhaar", "id" to "aadhaar", "age" to "age", "address" to "address")
+    val parts = LinkedHashMap<String, StringBuilder>(); val lead = StringBuilder(); var cur: String? = null
+    for (w in heard.trim().split(Regex("\\s+"))) {
+        val k = kw[w.lowercase().trim(',', '.')]
+        if (k != null) { cur = k; parts.getOrPut(k) { StringBuilder() }; continue }
+        val c = cur
+        if (c == null) lead.append(w).append(' ') else parts[c]?.append(w)?.append(' ')
+    }
+    val name = parts["name"]?.toString()?.takeIf { it.isNotBlank() } ?: lead.toString().takeIf { it.isNotBlank() }
+    val mob = parts["mobile"]?.let { spokenDigits(it.toString()) }?.takeIf { it.length >= 10 }?.takeLast(10)
+    val aad = parts["aadhaar"]?.let { spokenDigits(it.toString()) }?.takeIf { it.length >= 6 }
+    val age = parts["age"]?.let { spokenNumber(it.toString()) }?.toInt()?.toString()
+    val addr = parts["address"]?.toString()?.trim()?.takeIf { it.isNotBlank() }
+    return PersonVoice(name?.let { titleCase(it) }, mob, aad, age, addr)
 }

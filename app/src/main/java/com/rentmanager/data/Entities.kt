@@ -12,7 +12,9 @@ data class GroupE(
     val extraPersonRent: Double = 500.0,
     val pricePerUnit: Double = 8.5,
     val extraCharge: Double = 0.0,
-    val billCount: Int = 10
+    val billCount: Int = 10,
+    @ColumnInfo(defaultValue = "0") val limitAdvance: Double = 0.0,
+    @ColumnInfo(defaultValue = "0") val extraPersonAdvance: Double = 0.0
 )
 
 /** Bill Preparing rows (meter readings) */
@@ -70,7 +72,8 @@ data class EbBill(
 
 data class Person(
     val name: String = "", val mobile: String = "", val aadhaar: String = "",
-    val age: String = "", val entryDate: String = "", val exitDate: String = ""
+    val age: String = "", val entryDate: String = "", val exitDate: String = "",
+    val address: String = "", val idType: String = ""
 )
 
 @Entity(tableName = "tenant_files")
@@ -100,6 +103,20 @@ data class Vacated(
     val repay: Double = 0.0, val collect: Double = 0.0
 )
 
+/** Tenant advance ledger: CREDIT = advance paid in, DEBIT = withdrawal / vacate settlement */
+@Entity(tableName = "adv_txns")
+data class AdvTxn(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val fileName: String = "", val kind: String = "CREDIT", val amount: Double = 0.0,
+    val date: String = "", val note: String = ""
+)
+
+/** Visited folder: a bill parked for the day (opens again next day) */
+@Entity(tableName = "visited", primaryKeys = ["billNo", "month"])
+data class Visited(
+    val billNo: String = "", val month: String = "", val visitedDate: String = "", val reason: String = ""
+)
+
 data class Backup(
     val version: Int = 1, val savedAt: String = "",
     val groups: List<GroupE> = emptyList(), val readings: List<Reading> = emptyList(),
@@ -107,5 +124,6 @@ data class Backup(
     val logs: List<PaymentLog> = emptyList(), val finance: List<FinanceRec> = emptyList(),
     val eb: List<EbBill> = emptyList(), val tenantFiles: List<TenantFile> = emptyList(),
     val msgMap: List<MsgMap> = emptyList(), val favs: List<Fav> = emptyList(),
-    val vacated: List<Vacated> = emptyList()
+    val vacated: List<Vacated> = emptyList(),
+    val advTxns: List<AdvTxn> = emptyList(), val visited: List<Visited> = emptyList()
 )
