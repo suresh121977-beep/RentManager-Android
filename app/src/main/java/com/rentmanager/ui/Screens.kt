@@ -176,7 +176,7 @@ import java.time.LocalDate
         LazyColumn { items(bills.filter { billMatch(it.billNo, q) }) { b -> val mob = mobile(b.billNo); val txt = billText(b, pays[b.billNo])
             Panel { Text("${b.billNo} • ${mob.ifBlank { "no mobile" }}", fontSize = 15.sp); Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 OutlinedButton({ edit = b.billNo }) { Text("📱") }; OutlinedButton({ Files.sms(ctx, mob, txt) }, enabled = mob.isNotBlank()) { Text("SMS") }
-                OutlinedButton({ Files.whatsapp(ctx, mob, txt) }, enabled = mob.isNotBlank()) { Text("WhatsApp") }; OutlinedButton({ Files.call(ctx, mob) }, enabled = mob.isNotBlank()) { Text("📞") } } } } }
+                OutlinedButton({ Files.whatsapp(ctx, mob, txt) }, enabled = mob.isNotBlank()) { Text("WhatsApp") }; OutlinedButton({ Files.call(ctx, mob) }, enabled = mob.isNotBlank()) { Text("📞") } } } } } }
     edit?.let { b -> var v by remember { mutableStateOf(mobile(b)) }
         AlertDialog(onDismissRequest = { edit = null }, title = { Text("Mobile for $b") }, text = { TxtField("Mobile", v, { v = it }) },
             confirmButton = { TextButton({ vm.saveMsg(listOf(MsgMap(b, v))); edit = null }) { Text("Save") } }, dismissButton = { TextButton({ edit = null }) { Text("Cancel") } }) }
