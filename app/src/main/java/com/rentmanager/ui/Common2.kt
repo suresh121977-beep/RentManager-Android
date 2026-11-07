@@ -90,7 +90,8 @@ private fun fmt0(d: Double?) = if (d == null) "-" else "%.0f".format(d)
         "Persons" to "${b.persons}",
         (if (fresher) "Rent" else "Rent (${b.rentDays} days)") to (if (fresher) "New tenant – no rent" else money(b.rent)),
         "Extra persons" to "${b.extraPersons} = ${money(b.extraTotal)}",
-        (if (fresher) "Advance due" else "Other / extra charge") to money(b.extraCharge),
+        "Other / extra charge" to money(b.extraCharge),
+        "Advance due" to money(b.advanceDue),
         "Previous balance" to money(b.prevBalance),
         "FINAL AMOUNT" to money(b.billAmount),
         "Received" to money(p?.received ?: 0.0), "Balance" to money(balanceOf(b, p)))

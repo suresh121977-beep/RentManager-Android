@@ -14,6 +14,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -23,6 +25,9 @@ import com.rentmanager.domain.*
 import com.rentmanager.util.Attachments
 import com.rentmanager.util.Files
 import com.rentmanager.util.Forms
+import com.rentmanager.util.AgrData
+import com.rentmanager.util.agrDataFor
+import com.rentmanager.util.agrDeclaration
 import com.rentmanager.util.Voice
 import kotlinx.coroutines.launch
 import java.io.File
@@ -145,7 +150,7 @@ import java.time.LocalDate
 @Composable fun TenantDetail(vm: AppVM, t: TenantFile, onBack: () -> Unit) {
     val ctx = LocalContext.current; val scope = rememberCoroutineScope()
     val txns by vm.advTxns.collectAsState(); val gs by vm.groups.collectAsState(); val vac by vm.vacated.collectAsState()
-    val m by vm.month.collectAsState(); val bills by vm.bills.collectAsState(); val pays by vm.payments.collectAsState()
+    val m by vm.month.collectAsState(); val bills by vm.bills.collectAsState(); val pays by vm.payments.collectAsState(); val rds by vm.readings.collectAsState()
     var tab by remember { mutableStateOf("Advance") }; var edit by remember { mutableStateOf(false) }; var advKind by remember { mutableStateOf("") }
     var person by remember { mutableStateOf<Person?>(null) }; var vacDialog by remember { mutableStateOf(false) }; var att by remember { mutableStateOf(false) }
     val g = groupFor(t.fileName, gs); val active = t.active()
@@ -159,9 +164,9 @@ import java.time.LocalDate
             TextButton({ att = true }) { Text("📎") }; TextButton({ edit = true }) { Text("✏ Edit") }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            BtnO("📄 Form (HTML)") { scope.launch { val html = Forms.tenantHtml(ctx, t, g, my); Files.share(ctx, "TenantForm_${t.fileName}.html", "text/html", html) } }
+            BtnO("⬇ Export tenant file (HTML)") { scope.launch { val html = Forms.tenantFileHtml(ctx, t, txns, bills, rds, vac); Files.share(ctx, "TenantFile_${t.fileName}.html", "text/html", html) } }
         }
-        Chips(listOf("Advance", "Persons", "History", "Vacate"), tab) { tab = it }
+        Chips(listOf("Advance", "History", "Persons", "Form", "Vacate"), tab) { tab = it }
         Box(Modifier.weight(1f)) {
             when (tab) {
                 "Advance" -> LazyColumn {
@@ -186,6 +191,7 @@ import java.time.LocalDate
                         }
                     }
                 }
+                "Form" -> AgreementTab(t, my)
                 "Persons" -> LazyColumn {
                     if (t.persons().isEmpty()) item { Empty("No persons. Tap ✏ Edit to add.") }
                     items(t.persons()) { p ->
@@ -253,55 +259,170 @@ import java.time.LocalDate
     }, confirmButton = { TextButton(onDismiss) { Text("Close") } })
 }
 
-/** Add / edit persons. "🎤 Add by voice" listens once and auto-fills the form. */
+@Composable private fun A(t: String, size: Int = 12, bold: Boolean = false, modifier: Modifier = Modifier, underline: Boolean = false) =
+    Text(t, modifier, color = Color.Black, fontSize = size.sp, fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
+        textDecoration = if (underline) TextDecoration.Underline else null)
+
+/** Agreement form: same layout as your PDF; English / Hindi / Tamil; download as HTML */
+@Composable fun AgreementTab(t: TenantFile, txns: List<AdvTxn>) {
+    val ctx = LocalContext.current; val scope = rememberCoroutineScope()
+    val prefs = remember { ctx.getSharedPreferences("rm", 0) }
+    var lang by remember { mutableStateOf(prefs.getString("agrLang", "en") ?: "en") }
+    val persons = t.persons()
+    var idx by remember(t.fileName) { mutableIntStateOf(0) }
+    var place by remember(t.fileName) { mutableStateOf("") }
+    val inCharge = persons.getOrNull(idx) ?: persons.firstOrNull()
+    Column(Modifier.verticalScroll(rememberScrollState())) {
+        Chips(AgrText.LANGS.map { it.second }, AgrText.LANGS.first { it.first == lang }.second) { lbl ->
+            lang = AgrText.LANGS.first { it.second == lbl }.first; prefs.edit().putString("agrLang", lang).apply()
+        }
+        if (inCharge == null) Empty("Add a person first (✏ Edit) to create the agreement.") else {
+            if (persons.size > 1) { Lbl("In-charge (responsible person)"); Chips(persons.mapIndexed { i, p -> "${i + 1}. ${p.name}" }, "${idx + 1}. ${inCharge.name}") { l -> idx = (l.substringBefore('.').toIntOrNull() ?: 1) - 1 } }
+            TxtField("Place", place, { place = it }, Modifier.fillMaxWidth())
+            val d = agrDataFor(t, txns, inCharge, place)
+            Row(Modifier.padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Btn("⬇ Download (${lang.uppercase()}) HTML", Modifier.weight(1f)) {
+                    scope.launch { val html = Forms.agreementHtml(ctx, d, lang)
+                        Files.share(ctx, "Agreement_${t.fileName}_${inCharge.name.replace(' ', '_')}_${lang.uppercase()}.html", "text/html", html) }
+                }
+            }
+            Lbl("The downloaded file has all 3 languages with a switch and a Print / PDF button.")
+            AgreementPreview(lang, d)
+        }
+    }
+}
+
+@Composable fun AgreementPreview(lang: String, d: AgrData) {
+    val tx = { k: String -> AgrText.t(lang, k) }
+    val p = d.inCharge; val today = fmtDay(LocalDate.now().toString())
+    @Composable fun row(k: String, v: String, bold: Boolean = false) {
+        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) { A("$k:", 12, true, Modifier.weight(0.46f)); A(v.ifBlank { "-" }, 12, bold, Modifier.weight(0.54f)) }
+    }
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp)) {
+            Row(Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f)) {
+                    A(tx("title"), 20, true); Spacer(Modifier.height(4.dp))
+                    A("${tx("fileNo")}: ${d.fileNo} | ${tx("group")}: ${d.group} | ${tx("date")}: $today", 11)
+                }
+                OutlinedCard(Modifier.size(width = 84.dp, height = 96.dp), colors = CardDefaults.outlinedCardColors(containerColor = Color(0xFFF3F4F6))) {
+                    Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Box(Modifier.weight(1f).fillMaxWidth()) { Text("👤", Modifier.align(Alignment.Center), fontSize = 34.sp) }
+                        A(tx("photoLabel"), 8)
+                    }
+                }
+            }
+            HorizontalDivider(Modifier.padding(vertical = 8.dp), thickness = 2.dp, color = Color.Black)
+            A(tx("responsible"), 14, true, underline = true); Spacer(Modifier.height(6.dp))
+            row(tx("fileNo"), d.fileNo); row(tx("inCharge"), p.name, true); row(tx("age"), p.age); row(tx("father"), p.fatherName)
+            row(tx("address"), p.address); row(tx("mobile"), p.mobile); row(tx("idType"), p.idType.ifBlank { "Aadhar Card" }); row(tx("idNumber"), p.aaadhaarSafe())
+            row(tx("company"), p.company); row(tx("initialAdvance"), "Rs. ${"%.0f".format(d.initialAmount)} on ${fmtDay(d.initialDate)}")
+            row(tx("entryDate"), fmtDay(p.entryDate.ifBlank { d.initialDate })); row(tx("totalAdvance"), "Rs. ${"%.0f".format(d.totalAdvance)}", true)
+            Spacer(Modifier.height(12.dp))
+            A("${tx("roomMates")} / Partners in File ${d.fileNo} (${d.mates.size})", 14, true, underline = true); Spacer(Modifier.height(4.dp))
+            if (d.mates.isEmpty()) A(tx("noRoomMates"), 12) else d.mates.forEachIndexed { i, m ->
+                A("${i + 1}. ${m.name} - ${tx("age")}: ${m.age.ifBlank { "-" }} - ${tx("mobile")}: ${m.mobile.ifBlank { "-" }} - ${m.idType.ifBlank { "Aadhar Card" }}: ${m.aaadhaarSafe().ifBlank { "-" }}", 12)
+            }
+            Spacer(Modifier.height(12.dp))
+            A(tx("conditions"), 14, true, underline = true); Spacer(Modifier.height(4.dp))
+            (AgrText.CONDS[lang] ?: emptyList()).forEachIndexed { i, c -> Row(Modifier.padding(vertical = 3.dp)) { A("${i + 1}.", 12, true); Spacer(Modifier.width(6.dp)); A(c, 12) } }
+            Spacer(Modifier.height(12.dp))
+            A(tx("declaration"), 14, true, underline = true); Spacer(Modifier.height(4.dp))
+            OutlinedCard(colors = CardDefaults.outlinedCardColors(containerColor = Color(0xFFFAFAFA))) { Box(Modifier.padding(10.dp)) { A(agrDeclaration(lang, d), 12) } }
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth()) { A("${tx("date")}: $today", 12, true, Modifier.weight(1f)); A("${tx("place")}: ${d.place.ifBlank { "__________" }}", 12, true) }
+            Spacer(Modifier.height(16.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    OutlinedCard(Modifier.size(width = 120.dp, height = 48.dp), colors = CardDefaults.outlinedCardColors(containerColor = Color.White)) { Box(Modifier.fillMaxSize()) { Text(tx("ownerAuth"), Modifier.align(Alignment.Center), color = Color.Gray, fontSize = 11.sp) } }
+                    A(tx("sigOwner"), 11, true)
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    OutlinedCard(Modifier.size(width = 120.dp, height = 48.dp), colors = CardDefaults.outlinedCardColors(containerColor = Color.White)) { Box(Modifier.fillMaxSize()) { Text("Signature", Modifier.align(Alignment.Center), color = Color.Gray, fontSize = 11.sp) } }
+                    A(tx("sigInCharge"), 11, true); A(p.name, 11)
+                }
+            }
+            HorizontalDivider(Modifier.padding(vertical = 10.dp))
+            A("${tx("generated")} - File ${d.fileNo} - $today", 9, modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
+private fun Person.aaadhaarSafe() = this.aadhaar
+
+/** Add / edit persons. The message box takes continuous voice typing: name, age, father, mobile, id number, company, address – then Apply. */
 @Composable fun TenantEditDialog(vm: AppVM, t0: TenantFile, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
     var fn by remember { mutableStateOf(t0.fileName) }; var ps by remember { mutableStateOf(t0.persons()) }
     val voice = remember { Voice(ctx) }; DisposableEffect(Unit) { onDispose { voice.shutdown() } }
-    var listening by remember { mutableStateOf(false) }; var heard by remember { mutableStateOf("") }; var wantIdx by remember { mutableIntStateOf(-1) }
+    var voiceText by remember { mutableStateOf("") }; var contOn by remember { mutableStateOf(false) }; var errs by remember { mutableIntStateOf(0) }
+    var applyTo by remember { mutableIntStateOf(-1) }; var info by remember { mutableStateOf("") }; var want by remember { mutableStateOf(false) }
 
-    fun fill(i: Int, text: String) {
-        val r = parsePersonVoice(text)
-        ps = ps.toMutableList().also { l ->
-            if (i in l.indices) { val p = l[i]
-                l[i] = p.copy(name = r.name ?: p.name, mobile = r.mobile ?: p.mobile, aadhaar = r.aadhaar ?: p.aadhaar, age = r.age ?: p.age, address = r.address ?: p.address) }
-        }
-    }
-    fun doListen(i: Int) {
-        listening = true
-        voice.listen(onText = { h -> listening = false; heard = h; fill(i, h) }, onError = { e -> listening = false; heard = e })
+    fun loopListen() {
+        voice.listen(onText = { h -> errs = 0; voiceText = (voiceText + " " + h).trim(); if (contOn) loopListen() },
+            onError = { e -> errs++; if (contOn && errs < 4) loopListen() else { contOn = false; info = e } })
     }
     val micPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if (ok && wantIdx >= 0) doListen(wantIdx)
-        wantIdx = -1
+        if (ok && want) { contOn = true; errs = 0; loopListen() }
+        want = false
     }
-    fun speakFill(i: Int) { if (voice.hasMic()) doListen(i) else { wantIdx = i; micPerm.launch(Manifest.permission.RECORD_AUDIO) } }
+    fun startSpeak() { if (voice.hasMic()) { contOn = true; errs = 0; loopListen() } else { want = true; micPerm.launch(Manifest.permission.RECORD_AUDIO) } }
+    fun applyText() {
+        val r = parsePersonVoice(voiceText)
+        var list = ps; var i = applyTo
+        if (i < 0 || i >= list.size) { list = list + Person(entryDate = LocalDate.now().toString(), idType = "Aadhar Card"); i = list.size - 1 }
+        val p = list[i]
+        ps = list.toMutableList().also {
+            it[i] = p.copy(name = r.name ?: p.name, mobile = r.mobile ?: p.mobile, aadhaar = r.aadhaar ?: p.aadhaar, age = r.age ?: p.age,
+                address = r.address ?: p.address, fatherName = r.father ?: p.fatherName, company = r.company ?: p.company)
+        }
+        applyTo = i
+        info = "Filled person ${i + 1}: " + listOfNotNull(r.name?.let { "name" }, r.age?.let { "age" }, r.father?.let { "father" }, r.mobile?.let { "mobile" },
+            r.aadhaar?.let { "id" }, r.company?.let { "company" }, r.address?.let { "address" }).joinToString(", ").ifBlank { "nothing understood" }
+    }
 
     AlertDialog(onDismissRequest = onDismiss, title = { Text(if (t0.fileName.isEmpty()) "New tenant file" else "Edit ${t0.fileName}") }, text = {
         LazyColumn {
             item {
                 TxtField("File name (NS5)", fn, { fn = it }, Modifier.fillMaxWidth())
-                Button({ val i = ps.size; ps = ps + Person(entryDate = LocalDate.now().toString()); speakFill(i) }, Modifier.padding(top = 6.dp)) { Text(if (listening) "🎙 Listening…" else "🎤 Add person by voice") }
-                Lbl("Say: name Ravi Kumar mobile 98765 43210 aadhaar 1234 5678 9012 age 30 address Anna Nagar")
-                if (heard.isNotBlank()) Lbl("Heard: $heard")
+                OutlinedCard(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                    Column(Modifier.padding(10.dp)) {
+                        Text("🎤 Voice typing", fontWeight = FontWeight.Bold)
+                        Lbl("Say continuously: name Ravi, age 38, father Ragavan, mobile 98765 43210, id number 1234 5678 9012, company TCS, address Anna Nagar")
+                        Chips(listOf("New person") + ps.mapIndexed { i, p -> "${i + 1}. ${p.name.ifBlank { "Person" }}" },
+                            if (applyTo < 0 || applyTo >= ps.size) "New person" else "${applyTo + 1}. ${ps[applyTo].name.ifBlank { "Person" }}") { l ->
+                            applyTo = if (l == "New person") -1 else (l.substringBefore('.').toIntOrNull() ?: 1) - 1
+                        }
+                        OutlinedTextField(voiceText, { voiceText = it }, Modifier.fillMaxWidth().padding(top = 6.dp), minLines = 3, label = { Text("Message box (speak or type)") })
+                        Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (contOn) BtnO("■ Stop", Modifier.weight(1f)) { contOn = false; voice.cancel() } else Btn("🎤 Speak", Modifier.weight(1f)) { startSpeak() }
+                            Btn("✓ Apply", Modifier.weight(1f)) { applyText() }
+                            BtnO("Clear", Modifier.weight(1f)) { voiceText = "" }
+                        }
+                        if (contOn) Lbl("🎙 Listening… keep talking, tap Stop when done")
+                        if (info.isNotBlank()) Lbl(info)
+                    }
+                }
             }
             itemsIdx(ps) { i, p ->
                 Column(Modifier.padding(top = 10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Person ${i + 1}", Modifier.weight(1f), fontWeight = FontWeight.Bold)
-                        TextButton({ speakFill(i) }) { Text("🎤") }
                         TextButton({ ps = ps.filterIndexed { j, _ -> j != i } }) { Text("Remove", color = Red) }
                     }
                     TxtField("Name", p.name, { v -> ps = ps.toMutableList().also { it[i] = p.copy(name = v) } }, Modifier.fillMaxWidth())
-                    TxtField("Mobile", p.mobile, { v -> ps = ps.toMutableList().also { it[i] = p.copy(mobile = v) } }, Modifier.fillMaxWidth())
-                    TxtField("Aadhaar / ID", p.aadhaar, { v -> ps = ps.toMutableList().also { it[i] = p.copy(aadhaar = v) } }, Modifier.fillMaxWidth())
                     TxtField("Age", p.age, { v -> ps = ps.toMutableList().also { it[i] = p.copy(age = v) } }, Modifier.fillMaxWidth())
-                    TxtField("Address", p.address, { v -> ps = ps.toMutableList().also { it[i] = p.copy(address = v) } }, Modifier.fillMaxWidth())
+                    TxtField("Father name", p.fatherName, { v -> ps = ps.toMutableList().also { it[i] = p.copy(fatherName = v) } }, Modifier.fillMaxWidth())
+                    TxtField("Mobile", p.mobile, { v -> ps = ps.toMutableList().also { it[i] = p.copy(mobile = v) } }, Modifier.fillMaxWidth())
+                    TxtField("Company (working)", p.company, { v -> ps = ps.toMutableList().also { it[i] = p.copy(company = v) } }, Modifier.fillMaxWidth())
+                    TxtField("ID type", p.idType.ifBlank { "Aadhar Card" }, { v -> ps = ps.toMutableList().also { it[i] = p.copy(idType = v) } }, Modifier.fillMaxWidth())
+                    TxtField("ID number", p.aadhaar, { v -> ps = ps.toMutableList().also { it[i] = p.copy(aadhaar = v) } }, Modifier.fillMaxWidth())
+                    TxtField("Address (as per ID)", p.address, { v -> ps = ps.toMutableList().also { it[i] = p.copy(address = v) } }, Modifier.fillMaxWidth())
                     TxtField("Entry date (yyyy-mm-dd)", p.entryDate, { v -> ps = ps.toMutableList().also { it[i] = p.copy(entryDate = v) } }, Modifier.fillMaxWidth())
                     TxtField("Exit date (blank = staying)", p.exitDate, { v -> ps = ps.toMutableList().also { it[i] = p.copy(exitDate = v) } }, Modifier.fillMaxWidth())
                 }
             }
-            item { TextButton({ ps = ps + Person(entryDate = LocalDate.now().toString()) }) { Text("＋ Add person (type)") } }
+            item { TextButton({ ps = ps + Person(entryDate = LocalDate.now().toString(), idType = "Aadhar Card") }) { Text("＋ Add person (type)") } }
         }
     },
         confirmButton = { TextButton({ vm.saveTenantFile(t0.copy(fileName = fn, groupName = groupLetters(fn)).withPersons(ps)); onDismiss() }) { Text("Save") } },

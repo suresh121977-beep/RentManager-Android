@@ -16,12 +16,13 @@ import com.rentmanager.domain.*
 import java.time.LocalDate
 
 @Composable fun FilterScreen(vm: AppVM) {
-    var menu by remember { mutableStateOf("Dual Payment") }
+    var menu by remember { mutableStateOf("Dual Payment") }; var search by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize()) {
         Chips(listOf("Dual Payment", "Collection", "Vacate", "New-comers"), menu) { menu = it }
+        if (menu == "Dual Payment") TxtField("SEARCH BILL NUMBER (N, N1 …)", search, { search = it.uppercase() }, Modifier.fillMaxWidth())
         Box(Modifier.weight(1f)) {
             when (menu) {
-                "Dual Payment" -> QuickPayPanel(vm, false)
+                "Dual Payment" -> QuickPayPanel(vm, false, search)
                 "Collection" -> CollectionPanel(vm)
                 "Vacate" -> VacatePanel(vm)
                 else -> NewcomersPanel(vm)

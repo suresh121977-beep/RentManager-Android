@@ -46,6 +46,13 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         get() = prefs.getFloat("price", 8.5f).toDouble()
         set(v) { prefs.edit().putFloat("price", v.toFloat()).apply() }
 
+    /** "TENANT" = persons come from tenant files, "CSV" = persons / previous balance come from the CSV */
+    val personMode = MutableStateFlow(prefs.getString("personMode", "TENANT") ?: "TENANT")
+    fun setPersonMode(m: String) = viewModelScope.launch {
+        personMode.value = m; prefs.edit().putString("personMode", m).apply(); syncInternal()
+        say(if (m == "TENANT") "Tenant file mode: persons come from tenant files" else "CSV mode: persons come from the CSV")
+    }
+
     init { viewModelScope.launch(Dispatchers.IO) { autoBackup() } }
 
     fun shift(n: Long) { month.value = shiftMonth(month.value, n) }
@@ -111,23 +118,28 @@ class AppVM(app: Application) : AndroidViewModel(app) {
 
     private suspend fun syncInternal() {
         val m = month.value; val gs = dao.groups().first()
+        val tenantMode = personMode.value == "TENANT"
         val rs = dao.readings().first().filter { it.month == m }
         val ready = rs.filter { !it.pending() }
         val old = dao.bills().first().filter { it.month == m }.associateBy { it.billNo }
-        val tfs = dao.tenantFiles().first().associateBy { norm(it.fileName) }
+        val tfs = if (tenantMode) dao.tenantFiles().first().associateBy { norm(it.fileName) } else emptyMap()
         fun make(billNo: String, r: Reading?): Bill {
             val g = groupFor(billNo, gs)
             val tf = tfs[billNo]; val active = tf?.active()?.size
             val vacant = tf != null && active == 0
+            // new tenant = every active person entered after the 10th: no rent, only advance due
             val fresher = tf != null && (active ?: 0) > 0 && isFresher(tf, m)
-            val advDue = if (fresher) max(0.0, expectedAdvance(g, active ?: 0) - (tf?.advance ?: 0.0)) else 0.0
+            // old party: late joiners (after the 10th) pay no extra-person rent, only their advance
+            val rated = if (tf != null && !fresher) ratedPersonCount(tf, m) else null
+            // fixed advance (Rent Update) minus advance entered in tenant file = advance due
+            val advDue = if (tf != null && (active ?: 0) > 0) max(0.0, expectedAdvance(g, active ?: 0) - tf.advance) else 0.0
             val fixed = if (r != null && g != null && g.pricePerUnit > 0 && r.price != g.pricePerUnit)
                 r.copy(price = g.pricePerUnit, charge = r.units * g.pricePerUnit) else r
-            return buildBill(billNo, m, fixed, g, old[billNo], active, vacant, fresher, advDue)
+            return buildBill(billNo, m, fixed, g, old[billNo], active, vacant, fresher, advDue, rated)
         }
         val out = ArrayList<Bill>()
         ready.forEach { out.add(make(it.billNo, it)) }
-        // new tenants (after the 10th) without a meter reading still get an advance-due bill
+        // new tenants without a meter reading still get an advance-due bill
         tfs.values.forEach { tf ->
             val k = norm(tf.fileName)
             if (rs.none { it.billNo == k } && tf.active().isNotEmpty() && isFresher(tf, m)) out.add(make(k, null))
@@ -143,11 +155,17 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         dao.upsertBills(listOf(b.copy(persons = persons, prevBalance = prevBalance, rentDays = rentDays)))
         syncInternal(); say("${b.billNo} updated ✓")
     }
+    /** CSV: BillNo,Persons,PreviousBalance (or BillNo,PreviousBalance). Tenant mode ignores the persons column. */
     fun importBalances(text: String) = viewModelScope.launch {
-        val rows = parseBalanceCsv(text); if (rows.isEmpty()) { say("No valid rows (BillNo,PreviousBalance)"); return@launch }
-        val m = month.value; val bs = bills.value.filter { it.month == m }.associateBy { it.billNo }
-        val upd = rows.mapNotNull { (b, v) -> bs[b]?.copy(prevBalance = v) }
-        dao.upsertBills(upd); syncInternal(); say("Previous balance set for ${upd.size} bills")
+        val rows = parseAdditionCsv(text); if (rows.isEmpty()) { say("No valid rows (BillNo,Persons,PreviousBalance)"); return@launch }
+        val m = month.value; val gs = groups.value; val tenantMode = personMode.value == "TENANT"
+        val cur = bills.value.filter { it.month == m }.associateBy { it.billNo }
+        val upd = rows.map { r ->
+            val base = cur[r.billNo] ?: buildBill(r.billNo, m, null, groupFor(r.billNo, gs), null, r.persons ?: 0, false)
+            base.copy(persons = if (tenantMode) base.persons else (r.persons ?: base.persons), prevBalance = r.prev ?: base.prevBalance)
+        }
+        dao.upsertBills(upd); syncInternal()
+        say(if (tenantMode) "Previous balance set for ${upd.size} bills (persons come from tenant files)" else "Persons & previous balance set for ${upd.size} bills")
     }
     /** Previous month's unpaid balance becomes this month's previous balance */
     fun carryBalances() = viewModelScope.launch {

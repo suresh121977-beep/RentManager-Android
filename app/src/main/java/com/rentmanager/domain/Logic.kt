@@ -3,6 +3,7 @@ package com.rentmanager.domain
 import com.rentmanager.data.*
 import java.time.LocalDate
 import java.time.YearMonth
+import java.time.temporal.ChronoUnit
 import kotlin.math.max
 
 fun norm(s: String?) = (s ?: "").trim().uppercase().replace(Regex("\\s+"), "")
@@ -131,10 +132,25 @@ fun isFresher(tf: TenantFile, month: String): Boolean {
 fun expectedAdvance(g: GroupE?, activePersons: Int): Double =
     if (g == null) 0.0 else g.limitAdvance + max(0, activePersons - g.limitedPerson) * g.extraPersonAdvance
 
-/** Bill = units*price + rent(days/30) + extra persons*extraRent + extraCharge + previous balance.
- *  New tenant (fresher): rentDays = -1, no rent; amount = units charge + advance due + previous balance. */
+/** Persons that count for rent in this cycle = active persons who entered on/before the cycle start (10th) */
+fun ratedPersonCount(tf: TenantFile, month: String): Int {
+    val start = cycleFor(month).start
+    return tf.active().count { val e = parseDate(it.entryDate); e == null || !e.isAfter(start) }
+}
+
+/** Entry date -> next bill date, total days (used to adjust rent by days) */
+data class DaysInfo(val entry: LocalDate?, val nextBill: LocalDate, val days: Int)
+fun rentDaysInfo(tf: TenantFile?, month: String): DaysInfo {
+    val c = cycleFor(month); val e = if (tf == null) null else entryDateOf(tf)
+    val days = if (e != null && e.isAfter(c.start)) ChronoUnit.DAYS.between(e, c.end).toInt().coerceIn(0, 31) else 30
+    return DaysInfo(e, c.end, days)
+}
+
+/** Bill = units*price + rent(days/30) + extra persons*extraRent + extraCharge + advance due + previous balance.
+ *  New tenant (fresher, entered after the 10th): rentDays = -1, no rent; amount = units + advance due + previous balance.
+ *  ratedPersons = persons that count for extra-person rent (late joiners pay only advance). */
 fun buildBill(billNo: String, month: String, r: Reading?, g: GroupE?, old: Bill?, personsOverride: Int?, vacant: Boolean,
-              fresher: Boolean = false, advanceDue: Double = 0.0): Bill {
+              fresher: Boolean = false, advanceDue: Double = 0.0, ratedPersons: Int? = null): Bill {
     val units = r?.units ?: old?.units ?: 0.0
     val price = g?.pricePerUnit ?: r?.price ?: 8.5
     val unitsCharge = units * price
@@ -142,13 +158,26 @@ fun buildBill(billNo: String, month: String, r: Reading?, g: GroupE?, old: Bill?
     val rent = if (fresher) 0.0 else (g?.rent ?: 3000.0) * days / 30.0
     val p = personsOverride ?: old?.persons ?: 0
     val lim = g?.limitedPerson ?: 3
-    val extraP = max(0, p - lim)
+    val extraP = max(0, (ratedPersons ?: p) - lim)
     val extraTotal = if (fresher) 0.0 else extraP * (g?.extraPersonRent ?: 500.0)
-    val extraCharge = if (fresher) advanceDue else (g?.extraCharge ?: 0.0)
+    val extraCharge = if (fresher) 0.0 else (g?.extraCharge ?: 0.0)
     val prev = old?.prevBalance ?: 0.0
-    val amount = if (vacant) 0.0 else unitsCharge + rent + extraTotal + extraCharge + prev
+    val amount = if (vacant) 0.0 else if (fresher) unitsCharge + advanceDue + prev
+        else unitsCharge + rent + extraTotal + extraCharge + advanceDue + prev
     return Bill(billNo, month, g?.name ?: groupLetters(billNo), units, unitsCharge, days, rent, p, extraP,
-        extraTotal, extraCharge, prev, amount, vacant)
+        extraTotal, extraCharge, prev, amount, vacant, advanceDue)
+}
+
+/** BillNo,Persons,PreviousBalance  (or BillNo,PreviousBalance) */
+data class AddRow(val billNo: String, val persons: Int?, val prev: Double?)
+fun parseAdditionCsv(text: String): List<AddRow> {
+    val lines = csvLines(text); if (lines.isEmpty()) return emptyList()
+    val start = if (Regex("bill|person|prev", RegexOption.IGNORE_CASE).containsMatchIn(lines[0]) && num(csvSplit(lines[0]).getOrNull(1)) == null) 1 else 0
+    return (start until lines.size).mapNotNull { i ->
+        val c = csvSplit(lines[i]); if (c.size < 2 || c[0].isBlank()) return@mapNotNull null
+        if (c.size >= 3) AddRow(norm(c[0]), c[1].trim().toDoubleOrNull()?.toInt(), num(c[2]))
+        else AddRow(norm(c[0]), null, num(c[1]))
+    }
 }
 
 enum class PayStatus { PAID, PARTIAL, UNPAID }
@@ -236,19 +265,26 @@ fun spokenNumber(t: String): Double? {
     return Regex("\\d+(\\.\\d+)?").find(s)?.value?.toDoubleOrNull()
 }
 
-data class PersonVoice(val name: String?, val mobile: String?, val aadhaar: String?, val age: String?, val address: String?)
+data class PersonVoice(val name: String?, val mobile: String?, val aadhaar: String?, val age: String?, val address: String?,
+                       val father: String? = null, val company: String? = null)
 
 private fun titleCase(s: String) = s.trim().split(" ").filter { it.isNotBlank() }
     .joinToString(" ") { w -> w.lowercase().replaceFirstChar { c -> c.uppercase() } }
 
-/** "name Ravi Kumar mobile 98765 43210 aadhaar 1234 5678 9012 age 30 address Anna Nagar" */
+/** "name Ravi age 38 father Ragavan mobile 98765 43210 id number 1234 5678 9012 company TCS address Anna Nagar" */
 fun parsePersonVoice(heard: String): PersonVoice {
-    val kw = mapOf("name" to "name", "mobile" to "mobile", "phone" to "mobile", "contact" to "mobile", "number" to "mobile",
-        "aadhaar" to "aadhaar", "aadhar" to "aadhaar", "adhar" to "aadhaar", "id" to "aadhaar", "age" to "age", "address" to "address")
+    val kw = mapOf("name" to "name", "mobile" to "mobile", "phone" to "mobile", "contact" to "mobile",
+        "aadhaar" to "aadhaar", "aadhar" to "aadhaar", "adhar" to "aadhaar", "id" to "aadhaar", "age" to "age", "address" to "address",
+        "father" to "father", "company" to "company", "working" to "company", "work" to "company", "office" to "company")
     val parts = LinkedHashMap<String, StringBuilder>(); val lead = StringBuilder(); var cur: String? = null
     for (w in heard.trim().split(Regex("\\s+"))) {
         val k = kw[w.lowercase().trim(',', '.')]
-        if (k != null) { cur = k; parts.getOrPut(k) { StringBuilder() }; continue }
+        if (k != null) {
+            val c0 = cur
+            // "father name", "company name", "working company": the second keyword is only a filler word
+            if (c0 != null && parts[c0]?.isEmpty() == true && ((k == "name" && (c0 == "father" || c0 == "company")) || (k == "company" && c0 == "company"))) continue
+            cur = k; parts.getOrPut(k) { StringBuilder() }; continue
+        }
         val c = cur
         if (c == null) lead.append(w).append(' ') else parts[c]?.append(w)?.append(' ')
     }
@@ -257,5 +293,7 @@ fun parsePersonVoice(heard: String): PersonVoice {
     val aad = parts["aadhaar"]?.let { spokenDigits(it.toString()) }?.takeIf { it.length >= 6 }
     val age = parts["age"]?.let { spokenNumber(it.toString()) }?.toInt()?.toString()
     val addr = parts["address"]?.toString()?.trim()?.takeIf { it.isNotBlank() }
-    return PersonVoice(name?.let { titleCase(it) }, mob, aad, age, addr)
+    val father = parts["father"]?.toString()?.trim()?.takeIf { it.isNotBlank() }
+    val comp = parts["company"]?.toString()?.trim()?.takeIf { it.isNotBlank() }
+    return PersonVoice(name?.let { titleCase(it) }, mob, aad, age, addr, father?.let { titleCase(it) }, comp?.let { titleCase(it) })
 }

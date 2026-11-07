@@ -131,6 +131,8 @@ class ReadFlow(private val vm: AppVM, val voice: Voice?, private val readingOf: 
     var price by remember { mutableStateOf(vm.price.toString()) }
     val pickFull = rememberTextPicker { vm.importReadings(it) }; val pickPrev = rememberTextPicker { vm.importPrevReadings(it) }
     Panel {
+        PersonModeChips(vm)
+        Spacer(Modifier.height(6.dp))
         Lbl("Default price / unit ₹ (a group's own price overrides)")
         NumField("Price/Unit", price, { price = it; num(it)?.let { v -> vm.price = v } }, Modifier.fillMaxWidth())
         Spacer(Modifier.height(6.dp))

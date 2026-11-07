@@ -21,7 +21,7 @@ import com.rentmanager.util.Files
 import java.time.LocalDate
 
 @Composable fun Screen(i: Int, vm: AppVM) = when (i) {
-    0 -> PreparingScreen(vm); 1 -> AdditionScreen(vm); 2 -> PersonScreen(vm); 3 -> RentUpdateScreen(vm)
+    0 -> PreparingScreen(vm); 1 -> AdditionScreen(vm); 2 -> PersonModifyScreen(vm); 3 -> RentUpdateScreen(vm)
     4 -> GroupsScreen(vm); 5 -> ManageScreen(vm); 6 -> FilterScreen(vm); 7 -> ReferenceScreen(vm)
     8 -> HistoryScreen(vm); 9 -> MessageScreen(vm); 10 -> TenantScreen(vm); 11 -> FinanceScreen(vm)
     12 -> ElectricScreen(vm); 13 -> EbScreen(vm); 14 -> VacantScreen(vm); 15 -> PrevHistScreen(vm)
@@ -40,8 +40,9 @@ import java.time.LocalDate
     val bills = monthBills(vm); val pays = monthPays(vm); val pick = rememberTextPicker { vm.importBalances(it) }
     Column(Modifier.fillMaxSize()) {
         Panel {
+            PersonModeChips(vm)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { Btn("🔄 Sync from Preparing") { vm.syncBills() }; BtnO("Carry balances") { vm.carryBalances() } }
-            BtnO("📄 Upload previous balances CSV") { pick() }
+            BtnO("📄 Upload CSV (BillNo, Persons, PrevBalance)") { pick() }
             Text("Total: ${money(bills.sumOf { it.billAmount })} • ${bills.size} bills", Modifier.padding(top = 4.dp))
         }
         QuickHost(vm, bills, pays, Modifier.weight(1f)) { open ->
@@ -51,8 +52,9 @@ import java.time.LocalDate
                     Panel(Modifier.clickable { open(b) }) {
                         Row { Text(b.billNo, Modifier.weight(1f), fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
                             Text(if (b.rentDays < 0 && b.billAmount <= 0) "–" else money(b.billAmount), fontSize = 16.sp, color = Teal) }
-                        Lbl(if (b.rentDays < 0) "NEW tenant • no rent • advance due ${money(b.extraCharge)} • ${"%.0f".format(b.units)}u • Prev ${money(b.prevBalance)}"
-                            else "${"%.0f".format(b.units)}u = ${money(b.unitsCharge)} • Rent ${money(b.rent)} • Extra ${money(b.extraTotal + b.extraCharge)} • Prev ${money(b.prevBalance)} • ${b.persons} persons")
+                        Lbl(if (b.rentDays < 0) "NEW tenant • no rent • advance due ${money(b.advanceDue)} • ${"%.0f".format(b.units)}u • Prev ${money(b.prevBalance)}"
+                            else "${"%.0f".format(b.units)}u = ${money(b.unitsCharge)} • Rent ${money(b.rent)} • Extra ${money(b.extraTotal + b.extraCharge)} • Prev ${money(b.prevBalance)} • ${b.persons} persons" +
+                                (if (b.advanceDue > 0) " • ADVANCE DUE ${money(b.advanceDue)}" else ""))
                     }
                 }
             }
@@ -61,32 +63,72 @@ import java.time.LocalDate
 }
 
 // 3 ---------------------------------------------------------------- Person Modify
-@Composable fun PersonScreen(vm: AppVM) {
-    val bills = monthBills(vm); val pays = monthPays(vm); var edit by remember { mutableStateOf<Bill?>(null) }
-    QuickHost(vm, bills, pays) { open ->
-        LazyColumn {
-            if (bills.isEmpty()) item { Empty("No bills this month.") }
-            items(bills) { b ->
-                Panel(Modifier.clickable { open(b) }) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(b.billNo, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
-                            Lbl("${b.persons} persons (${b.extraPersons} extra) • " + (if (b.rentDays < 0) "New tenant" else "Rent days ${b.rentDays}") + " • Prev ${money(b.prevBalance)}")
-                        }
-                        OutlinedButton({ edit = b }) { Text("✏ Edit") }
-                    }
-                }
+@Composable fun PersonModeChips(vm: AppVM) {
+    val mode by vm.personMode.collectAsState()
+    Column {
+        Lbl("Person details source")
+        Chips(listOf("Tenant file mode", "CSV mode"), if (mode == "TENANT") "Tenant file mode" else "CSV mode") { vm.setPersonMode(if (it.startsWith("Tenant")) "TENANT" else "CSV") }
+        Lbl(if (mode == "TENANT") "Persons come only from Tenant Files (persons in a CSV are ignored)." else "Persons & previous balance come from the CSV: BillNo,Persons,PreviousBalance")
+    }
+}
+
+/** Search a bill → bill addition details + entry date → next bill date = total days; adjust rent by days */
+@Composable fun PersonModifyScreen(vm: AppVM) {
+    val bills = monthBills(vm); val tfs by vm.tenantFiles.collectAsState(); val m by vm.month.collectAsState()
+    var q by remember { mutableStateOf("") }; var sel by remember { mutableStateOf("") }
+    val modified = bills.filter { it.rentDays in 0..29 }
+    val matches = if (q.isBlank()) emptyList() else bills.filter { billMatch(it.billNo, q) }
+    val pickNo = if (sel.isNotEmpty()) sel else if (matches.size == 1) matches[0].billNo else ""
+    val chosen = bills.firstOrNull { it.billNo == pickNo }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        TxtField("🔍 Search bill number (N1, N …)", q, { q = it; sel = "" }, Modifier.fillMaxWidth())
+        if (q.isNotBlank()) {
+            if (matches.isEmpty()) Lbl("No bill found")
+            if (matches.size > 1) { Lbl("${matches.size} found – tap a number"); NumberGrid(matches.map { it.billNo to (if (it.rentDays in 0..29) Amber else Teal) }) { sel = it } }
+        }
+        if (chosen != null) PersonAdjustCard(vm, chosen, tfs.firstOrNull { it.fileName == chosen.billNo }, m)
+        H("Modified bills (${modified.size})")
+        if (modified.isEmpty()) Empty("No bill has adjusted rent days yet. Search a bill number above.")
+        modified.forEach { b ->
+            Panel(Modifier.clickable { sel = b.billNo; q = b.billNo }) {
+                Row { Text(b.billNo, Modifier.weight(1f), fontSize = 16.sp, fontWeight = FontWeight.ExtraBold); Text("${b.rentDays} days", color = Amber, fontWeight = FontWeight.Bold) }
+                Lbl("Rent ${money(b.rent)} • Final ${money(b.billAmount)}")
             }
         }
     }
-    edit?.let { b ->
-        var p by remember { mutableStateOf(b.persons.toString()) }; var pb by remember { mutableStateOf("%.0f".format(b.prevBalance)) }
-        var d by remember { mutableStateOf((b.rentDays.takeIf { it >= 0 } ?: 30).toString()) }
-        AlertDialog(onDismissRequest = { edit = null }, title = { Text("Modify ${b.billNo}") }, text = { Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            NumField("Persons staying", p, { p = it }); NumField("Previous balance ₹", pb, { pb = it }); NumField("Rent days (30 = full)", d, { d = it })
-            Lbl("If a tenant file exists, persons come from the tenant file.") } },
-            confirmButton = { TextButton({ vm.editBill(b, p.toIntOrNull() ?: b.persons, num(pb) ?: 0.0, (d.toIntOrNull() ?: 30).coerceIn(0, 31)); edit = null }) { Text("Save") } },
-            dismissButton = { TextButton({ edit = null }) { Text("Cancel") } })
+}
+
+@Composable fun PersonAdjustCard(vm: AppVM, b: Bill, tf: TenantFile?, month: String) {
+    val gs by vm.groups.collectAsState()
+    val info = rentDaysInfo(tf, month)
+    val full = groupFor(b.billNo, gs)?.rent ?: 0.0
+    var days by remember(b.billNo, b.rentDays) { mutableStateOf((if (b.rentDays >= 0) b.rentDays else info.days).toString()) }
+    var pb by remember(b.billNo, b.prevBalance) { mutableStateOf("%.0f".format(b.prevBalance)) }
+    val d = days.toIntOrNull()
+    Panel {
+        Text(b.billNo, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+        if (b.rentDays < 0) Text("New tenant (entered after the 10th) – no rent this cycle, only advance due", color = Amber, fontSize = 13.sp)
+        val people = tf?.active() ?: emptyList()
+        if (people.isEmpty()) Lbl("No tenant file persons • ${b.persons} persons in bill") else people.forEach { Lbl("👤 ${it.name} • entry ${fmtDay(it.entryDate)}") }
+        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+        listOf("Entry date" to (info.entry?.let { fmtDay(it.toString()) } ?: "-"), "Next bill date" to fmtDay(info.nextBill.toString()),
+            "Total days" to "${info.days} days").forEach { (k, v) -> Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) { Text(k, Modifier.weight(1f), fontSize = 14.sp); Text(v, fontWeight = FontWeight.Bold) } }
+        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+        Lbl("From Bill Addition")
+        listOf("Units" to "%.0f".format(b.units), "Rent (${if (b.rentDays < 0) 0 else b.rentDays} days)" to money(b.rent), "Extra persons" to "${b.extraPersons} = ${money(b.extraTotal)}",
+            "Advance due" to money(b.advanceDue), "Previous balance" to money(b.prevBalance), "FINAL AMOUNT" to money(b.billAmount)).forEach { (k, v) ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) { Text(k, Modifier.weight(1f), fontSize = 14.sp); Text(v, fontWeight = FontWeight.Bold, color = if (k == "FINAL AMOUNT") Teal else androidx.compose.ui.graphics.Color.Unspecified) }
+        }
+        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+        NumField("Adjust rent days (30 = full month)", days, { days = it }, Modifier.fillMaxWidth())
+        Lbl("Rent for ${d ?: 0} days = ${money(full * (d ?: 0).coerceIn(0, 31) / 30.0)}")
+        Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            BtnO("Use ${info.days} days") { days = info.days.toString() }; BtnO("Full 30") { days = "30" }
+        }
+        NumField("Previous balance ₹", pb, { pb = it }, Modifier.fillMaxWidth().padding(top = 6.dp))
+        Btn("✓ Apply (update Person Modify & Bill Addition)", Modifier.fillMaxWidth().padding(top = 6.dp)) {
+            vm.editBill(b, b.persons, num(pb) ?: 0.0, (d ?: 30).coerceIn(0, 31))
+        }
     }
 }
 
@@ -120,23 +162,25 @@ import java.time.LocalDate
             }
         }
     }
-    edit?.let { g ->
-        var n by remember { mutableStateOf(g.name) }; var r by remember { mutableStateOf(g.rent.toString()) }; var l by remember { mutableStateOf(g.limitedPerson.toString()) }
-        var e by remember { mutableStateOf(g.extraPersonRent.toString()) }; var la by remember { mutableStateOf(g.limitAdvance.toString()) }
-        var ea by remember { mutableStateOf(g.extraPersonAdvance.toString()) }; var p by remember { mutableStateOf(g.pricePerUnit.toString()) }
-        var x by remember { mutableStateOf(g.extraCharge.toString()) }; var c by remember { mutableStateOf(g.billCount.toString()) }
-        AlertDialog(onDismissRequest = { edit = null }, title = { Text(if (g.name.isEmpty()) "New group" else "Edit ${g.name}") }, text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                TxtField("Group letters (e.g. NS)", n, { n = it }); NumField("Rent ₹", r, { r = it })
-                NumField("Limit (persons)", l, { l = it }); NumField("Extra person rent ₹", e, { e = it })
-                H("Advance"); NumField("Limit advance ₹ (for limited persons)", la, { la = it }); NumField("Extra person advance ₹ (each)", ea, { ea = it })
-                H("Other"); NumField("Extra charge ₹", x, { x = it }); NumField("Price per unit ₹", p, { p = it }); NumField("Number of files", c, { c = it })
-            } },
-            confirmButton = { TextButton({
-                vm.saveGroup(GroupE(n, num(r) ?: 3000.0, l.toIntOrNull() ?: 3, num(e) ?: 500.0, num(p) ?: 8.5, num(x) ?: 0.0,
-                    (c.toIntOrNull() ?: 1).coerceAtLeast(1), num(la) ?: 0.0, num(ea) ?: 0.0)); edit = null }) { Text("Save") } },
-            dismissButton = { TextButton({ edit = null }) { Text("Cancel") } })
-    }
+    edit?.let { g -> GroupEditDialog(vm, g) { edit = null } }
+}
+
+@Composable fun GroupEditDialog(vm: AppVM, g: GroupE, onDismiss: () -> Unit) {
+    var n by remember { mutableStateOf(g.name) }; var r by remember { mutableStateOf(g.rent.toString()) }; var l by remember { mutableStateOf(g.limitedPerson.toString()) }
+    var e by remember { mutableStateOf(g.extraPersonRent.toString()) }; var la by remember { mutableStateOf(g.limitAdvance.toString()) }
+    var ea by remember { mutableStateOf(g.extraPersonAdvance.toString()) }; var p by remember { mutableStateOf(g.pricePerUnit.toString()) }
+    var x by remember { mutableStateOf(g.extraCharge.toString()) }; var c by remember { mutableStateOf(g.billCount.toString()) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(if (g.name.isEmpty()) "New group" else "Rent Update • ${g.name}") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            TxtField("Group letters (e.g. NS)", n, { n = it }); NumField("Rent ₹", r, { r = it })
+            NumField("Limit (persons)", l, { l = it }); NumField("Extra person rent ₹", e, { e = it })
+            H("Advance"); NumField("Limit advance ₹ (for limited persons)", la, { la = it }); NumField("Extra person advance ₹ (each)", ea, { ea = it })
+            H("Other"); NumField("Extra charge ₹", x, { x = it }); NumField("Price per unit ₹", p, { p = it }); NumField("Number of files", c, { c = it })
+        } },
+        confirmButton = { TextButton({
+            vm.saveGroup(GroupE(n, num(r) ?: 3000.0, l.toIntOrNull() ?: 3, num(e) ?: 500.0, num(p) ?: 8.5, num(x) ?: 0.0,
+                (c.toIntOrNull() ?: 1).coerceAtLeast(1), num(la) ?: 0.0, num(ea) ?: 0.0)); onDismiss() }) { Text("Save") } },
+        dismissButton = { TextButton(onDismiss) { Text("Cancel") } })
 }
 
 // 5 ---------------------------------------------------------------- Groups summary

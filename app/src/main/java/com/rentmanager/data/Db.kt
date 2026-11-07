@@ -98,7 +98,7 @@ abstract class AppDao {
 @Database(
     entities = [GroupE::class, Reading::class, Bill::class, Payment::class, PaymentLog::class, FinanceRec::class,
         EbBill::class, TenantFile::class, MsgMap::class, Fav::class, Vacated::class, AdvTxn::class, Visited::class],
-    version = 2, exportSchema = false
+    version = 3, exportSchema = false
 )
 abstract class Db : RoomDatabase() {
     abstract fun dao(): AppDao
@@ -111,10 +111,15 @@ abstract class Db : RoomDatabase() {
                 db.execSQL("CREATE TABLE IF NOT EXISTS `visited` (`billNo` TEXT NOT NULL, `month` TEXT NOT NULL, `visitedDate` TEXT NOT NULL, `reason` TEXT NOT NULL, PRIMARY KEY(`billNo`, `month`))")
             }
         }
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE bills ADD COLUMN advanceDue REAL NOT NULL DEFAULT 0")
+            }
+        }
         @Volatile private var inst: Db? = null
         fun get(c: Context): Db = inst ?: synchronized(this) {
             inst ?: Room.databaseBuilder(c.applicationContext, Db::class.java, "rent_manager.db")
-                .addMigrations(MIGRATION_1_2).build().also { inst = it }
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { inst = it }
         }
     }
 }

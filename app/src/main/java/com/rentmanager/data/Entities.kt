@@ -34,7 +34,8 @@ data class Bill(
     val rentDays: Int = 30, val rent: Double = 0.0,
     val persons: Int = 0, val extraPersons: Int = 0, val extraTotal: Double = 0.0,
     val extraCharge: Double = 0.0, val prevBalance: Double = 0.0,
-    val billAmount: Double = 0.0, val vacant: Boolean = false
+    val billAmount: Double = 0.0, val vacant: Boolean = false,
+    @ColumnInfo(defaultValue = "0") val advanceDue: Double = 0.0
 )
 
 /** Bill Management totals per flat per month */
@@ -73,7 +74,8 @@ data class EbBill(
 data class Person(
     val name: String = "", val mobile: String = "", val aadhaar: String = "",
     val age: String = "", val entryDate: String = "", val exitDate: String = "",
-    val address: String = "", val idType: String = ""
+    val address: String = "", val idType: String = "",
+    val fatherName: String = "", val company: String = ""
 )
 
 @Entity(tableName = "tenant_files")
